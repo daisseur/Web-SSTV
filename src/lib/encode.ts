@@ -102,6 +102,57 @@ export class Format {
         return time;
     }
 
+	encodePrefixSync(oscillator: OscillatorNode, startTime: number): number {
+		let time = startTime;
+	
+		const frequencies = [1900, 1500, 1900, 1500, 2300, 1500, 2300, 1500];
+		for (const freq of frequencies) {
+			oscillator.frequency.setValueAtTime(freq, time);
+			time += PREFIX_PULSE_LENGTH;
+		}
+	
+		return time;
+	}
+	
+	encodeHeaderSync(oscillator: OscillatorNode, startTime: number): number {
+		let time = startTime;
+	
+		// Définition de l'en-tête initial
+		oscillator.frequency.setValueAtTime(1900, time);
+		time += HEADER_PULSE_LENGTH;
+	
+		oscillator.frequency.setValueAtTime(SYNC_PULSE_FREQ, time);
+		time += HEADER_BREAK_LENGTH;
+	
+		oscillator.frequency.setValueAtTime(1900, time);
+		time += HEADER_PULSE_LENGTH;
+	
+		// Bit de synchronisation VIS
+		oscillator.frequency.setValueAtTime(SYNC_PULSE_FREQ, time);
+		time += VIS_BIT_LENGTH;
+	
+		// Codage VIS en bits et calcul de la parité
+		let parity = 0;
+		this.VISCode.reverse().forEach((bit) => {
+			const bitFreq = bit ? VIS_BIT_FREQ.ONE : VIS_BIT_FREQ.ZERO;
+			oscillator.frequency.setValueAtTime(bitFreq, time);
+			time += VIS_BIT_LENGTH;
+			if (bit) ++parity;
+		});
+	
+		// Bit de parité VIS
+		const parityBitFreq = parity % 2 === 0 ? VIS_BIT_FREQ.ZERO : VIS_BIT_FREQ.ONE;
+		oscillator.frequency.setValueAtTime(parityBitFreq, time);
+		time += VIS_BIT_LENGTH;
+	
+		// Bit de fin de synchronisation
+		oscillator.frequency.setValueAtTime(SYNC_PULSE_FREQ, time);
+		time += VIS_BIT_LENGTH;
+	
+		return time;
+	}
+	
+
     encodeHeader(oscillator: OscillatorNode, startTime: number): number {
         let time = startTime;
 
@@ -140,6 +191,10 @@ export class Format {
     encodeSSTV(oscillator: OscillatorNode, startTime: number): void {
         throw new Error("Must be defined by a subclass");
     }
+
+	encodeSSTVDataSync(): Float32Array {
+		throw new Error("Must be defined by a subclass");
+	}
 
     getNumScanLines(): number {
         return this.numScanLines;
@@ -309,7 +364,56 @@ class ScottieBase extends Format {
 	  oscillator.start(startTime); // Démarrage de l'oscillateur
 	  oscillator.stop(time); // Arrêt de l'oscillateur
 	}
-  }
+  
+
+  encodeSSTVDataSync(sampleRate: number, startTime: number): Float32Array {
+    let time = startTime;
+    const duration = this.calculateTotalDuration(); // Durée totale nécessaire pour les échantillons
+    const totalSamples = Math.floor(duration * sampleRate);
+    const audioData = new Float32Array(totalSamples);
+
+    let sampleIndex = 0;
+
+    // Fonction pour ajouter une fréquence dans le tableau audio
+    const addFrequency = (frequency: number, length: number) => {
+        const samplesForLength = Math.floor(length * sampleRate);
+        for (let i = 0; i < samplesForLength; i++) {
+            const sampleTime = sampleIndex / sampleRate;
+            audioData[sampleIndex] = Math.sin(2 * Math.PI * frequency * sampleTime);
+            sampleIndex++;
+        }
+    };
+
+    // Ajout du préfixe et de l'en-tête SSTV
+    time = super.encodePrefixSync(addFrequency, time);
+    time = super.encodeHeaderSync(addFrequency, time);
+
+    // Fréquence d'impulsion de synchronisation initiale
+    addFrequency(SYNC_PULSE_FREQ, super.getSyncPulseLength());
+    time += super.getSyncPulseLength();
+
+    // Balayage des lignes de données
+    for (let scanLine = 0; scanLine < super.getNumScanLines(); ++scanLine) {
+        for (let dataLine = 0; dataLine < 3; ++dataLine) {
+            if (dataLine === 2) {
+                addFrequency(SYNC_PULSE_FREQ, super.getSyncPulseLength());
+                time += super.getSyncPulseLength();
+            }
+            addFrequency(BLANKING_PULSE_FREQ, super.getBlankingInterval());
+            time += super.getBlankingInterval();
+
+            // Ajout de la ligne de balayage en fonction de l'image préparée
+            const frequencyData = super.getPreparedImage()[scanLine][dataLine];
+            frequencyData.forEach((frequency, index) => {
+                addFrequency(frequency, super.getScanLineLength() / frequencyData.length);
+            });
+            time += super.getScanLineLength();
+        }
+    }
+
+    return audioData;
+	}
+}
   
 
 export class ScottieOne extends ScottieBase {
@@ -561,8 +665,50 @@ class WrasseSC2 extends Format {
 	  oscillator.start(startTime); // Démarrage de l'oscillateur
 	  oscillator.stop(time); // Arrêt de l'oscillateur
 	}
-  }
-  
+
+	encodeSSTVDataSync() {
+		const sampleRate = 44100; // Sample rate in Hz (use a standard rate)
+		let time = 0;
+		const audioData: number[] = [];
+
+		// Fonction pour ajouter une fréquence pour une durée donnée
+		const addFrequency = (frequency: number, duration: number) => {
+			const numSamples = Math.floor(sampleRate * duration);
+			for (let i = 0; i < numSamples; i++) {
+				const sample = Math.sin(2 * Math.PI * frequency * (time / sampleRate));
+				audioData.push(sample);
+				time++;
+			}
+		};
+
+		// Encodage des préfixes et de l'en-tête
+		time = super.encodePrefixSync(addFrequency, time);
+		time = super.encodeHeaderSync(addFrequency, time);
+
+		// Encodage des lignes de balayage
+		for (let scanLine = 0; scanLine < super.getNumScanLines(); ++scanLine) {
+			addFrequency(SYNC_PULSE_FREQ, super.getSyncPulseLength());
+			addFrequency(BLANKING_PULSE_FREQ, super.getBlankingInterval());
+
+			for (let dataLine = 0; dataLine < 3; ++dataLine) {
+				const imageLine = super.getPreparedImage()[scanLine][dataLine];
+				const scanLineLength = super.getScanLineLength();
+
+				// Ajout des données de l'image pour chaque ligne
+				for (let j = 0; j < imageLine.length; j++) {
+					const frequency = imageLine[j];
+					addFrequency(frequency, scanLineLength / imageLine.length);
+				}
+
+				// Blanking interval après chaque ligne de données
+				addFrequency(BLANKING_PULSE_FREQ, super.getBlankingInterval());
+			}
+		}
+
+		// Conversion en Float32Array pour retour
+		return new Float32Array(audioData);
+	}
+}
 
 export class WrasseSC2180 extends WrasseSC2 {
 	constructor() {
@@ -634,3 +780,7 @@ export function bufferToWave(abuffer: AudioBuffer, len: number) {
         pos += 4;
     }
 }
+function encodeSSTVDataSync() {
+	throw new Error("Function not implemented.");
+}
+

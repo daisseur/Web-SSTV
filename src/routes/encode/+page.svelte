@@ -114,42 +114,30 @@
     const canvasData = canvasCtx.getImageData(0, 0, canvas.width, canvas.height);
     sstvFormat.prepareImage(canvasData.data as unknown as number[][][]);
 
-    // Réinitialisation de l'oscillateur et du MediaStreamDestination
-    const dest = audioCtx.createMediaStreamDestination();
-    const oscillator = audioCtx.createOscillator();
-    oscillator.type = "sine";
-    oscillator.connect(dest);
+    try {
+        // Encode les données SSTV sans attendre le temps réel
+        const audioData = sstvFormat.encodeSSTVData();
 
-    // Configuration de l'enregistreur pour capturer les chunks du flux
-    const recorder = new MediaRecorder(dest.stream);
-    const chunks: any[] = [];
+        // Transformation des données audio en AudioBuffer pour le traitement
+        const audioBuffer = new AudioBuffer({
+            length: audioData.length,
+            sampleRate: audioCtx.sampleRate
+        });
 
-    recorder.ondataavailable = (e) => chunks.push(e.data);
+        audioBuffer.copyToChannel(new Float32Array(audioData), 0);
 
-    // Démarrage de l'enregistrement pour capturer les données audio
-    recorder.start();
-    const startTime = audioCtx.currentTime + 1;
-    sstvFormat.encodeSSTV(oscillator, startTime); // Encode les données SSTV
-    oscillator.start(startTime);
-
-    // Déterminer la durée de l'encodage
-    const encodeDuration = sstvFormat.getDuration();
-    oscillator.stop(startTime + encodeDuration); // Arrêter l'oscillateur après la durée de l'encodage
-
-    // Arrêter l'enregistreur après la durée de l'encodage
-    setTimeout(() => recorder.stop(), (encodeDuration + 1) * 1000); // Ajout d'une marge pour s'assurer de capter tous les chunks
-
-    // Gestion de l'arrêt et transformation en Blob
-    recorder.onstop = async () => {
-        const blob = new Blob(chunks, { type: 'audio/ogg; codecs=opus' });
-        const arrayBuffer = await blob.arrayBuffer();
-        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+        // Transformation en buffer WAV
         const wavBuffer = bufferToWave(audioBuffer, audioBuffer.length);
         wavBlob = new Blob([wavBuffer], { type: 'audio/wav' });
         audioUrl = URL.createObjectURL(wavBlob);
+
         warningMessage = "";
-    };
+    } catch (error) {
+        warningMessage = "An error occurred during encoding.";
+        console.log("Encoding error:", error);
+    }
 }
+
 
     onMount(() => {
         audioCtx = new AudioContext();
@@ -206,7 +194,7 @@
     <button onclick={startEncode} class="contrast" disabled={!imageLoaded}>Encode</button>
     {#if audioUrl}
         <audio src={audioUrl} controls></audio>
-        <a href={audioUrl} download="sstv_{imgName}.wav">Download</a>
+        <a href={audioUrl} download={`sstv_${imgName}.wav`}>Download</a>
     {/if}
 
 </main>
